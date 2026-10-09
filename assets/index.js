@@ -1,4 +1,4 @@
-// Guelph Bus Stops landing page: preview map + copy buttons.
+// Guelph Hydrants landing page: preview map + copy buttons.
 
 (function () {
   "use strict";
@@ -10,7 +10,7 @@
     }
 
     var map = L.map(el, { minZoom: 11, maxZoom: 19 }).setView(
-      [43.5448, -80.2482], 15
+      [43.5448, -80.2482], 16
     );
 
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -21,7 +21,7 @@
     }).addTo(map);
 
     L.tileLayer(el.dataset.rasterUrl, {
-      minZoom: 13,
+      minZoom: 15,
       maxNativeZoom: 17,
       maxZoom: 19,
     }).addTo(map);

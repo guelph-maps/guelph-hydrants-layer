@@ -4,20 +4,20 @@
   "use strict";
 
   var COLORS = {
-    missing: "#7048e8", noref: "#2b8a3e", far: "#c92a2a",
-    duplicate: "#d6336c", mismatch: "#1c7ed6", unnamed: "#e8590c",
-    osm_only: "#495057", ondemand: "#868e96",
+    missing: "#7048e8", far: "#c92a2a", duplicate: "#d6336c",
+    notype: "#2b8a3e", nocolour: "#e8590c", noposition: "#1c7ed6",
+    osm_only: "#495057",
   };
   // What a mapper does about each status; shown in the popup.
   var ACTIONS = {
-    missing: "No OSM stop has this ref. Add the stop.",
-    noref: "The OSM stop here has no ref. Add ref=",
-    far: "The OSM stop with this ref is far from the City's point.",
-    duplicate: "Two OSM stops far apart carry this ref.",
-    mismatch: "The OSM name differs from the City's.",
-    unnamed: "The OSM stop has no name.",
-    osm_only: "OSM has this Guelph Transit ref; the City does not list it.",
-    ondemand: "On-demand pick-up point only; not in OSM.",
+    missing: "No OSM hydrant here. Add it once you have seen it.",
+    far: "The nearest OSM hydrant is some metres off. Check which point is right.",
+    duplicate: "Two OSM hydrants for one City hydrant. One is probably surplus.",
+    notype: "The OSM hydrant has no fire_hydrant:type (pillar, underground...).",
+    nocolour: "The OSM hydrant has no colour.",
+    noposition: "The OSM hydrant has no fire_hydrant:position (green, sidewalk...).",
+    osm_only: "No City hydrant nearby. Probably private (the City layer is " +
+      "municipal only): worth a look, not a fix.",
   };
   var map;
   var features = [];
@@ -31,7 +31,8 @@
     if (!el || typeof L === "undefined" || !el.dataset.geojson) {
       return;
     }
-    map = L.map(el).setView([43.5448, -80.2482], 13);
+    // Canvas, not SVG: there are thousands of markers.
+    map = L.map(el, { preferCanvas: true }).setView([43.5448, -80.2482], 13);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution:
@@ -40,7 +41,7 @@
     }).addTo(map);
     if (el.dataset.raster) {
       L.tileLayer(el.dataset.raster, {
-        minZoom: 13, maxNativeZoom: 17, maxZoom: 19, opacity: 0.85,
+        minZoom: 15, maxNativeZoom: 17, maxZoom: 19, opacity: 0.85,
       }).addTo(map);
     }
 
@@ -60,8 +61,9 @@
       f.properties._i = i;
       var c = f.geometry.coordinates;
       f._center = [c[1], c[0]];
+      // "missing" is nearly every City hydrant; smaller, so the rest show.
       var m = L.circleMarker(f._center, {
-        radius: 7,
+        radius: f.properties.status === "missing" ? 4 : 7,
         color: "#fff",
         weight: 2,
         fillColor: COLORS[f.properties.status] || "#888",
@@ -78,8 +80,8 @@
   }
 
   // Where to send the user for a feature: the openstreetmap.org view and the
-  // iD editor. Points at the existing OSM stop when there is one, else at the
-  // City's point.
+  // iD editor. Points at the existing OSM hydrant when there is one, else at
+  // the City's point.
   function osmTargets(f) {
     var p = f.properties;
     var m = p.osm_url && p.osm_url.match(/(node|way|relation)\/(\d+)/);
@@ -106,54 +108,75 @@
       'title="Open in the iD editor (hotkey: I)">iD</a>';
   }
 
+  // What names the row: the City's hydrant number, else its ArcGIS row.
+  function label(p) {
+    if (p.hydrant_id != null) { return String(p.hydrant_id); }
+    if (p.objectid != null) { return "row " + p.objectid; }
+    return "(OSM)";
+  }
+
   function popupHtml(f) {
     var p = f.properties;
-    var h = "<strong>" + esc(p.ref) + "</strong> " +
-      esc(p.name || p.osm_name || "(unnamed)") + "<br>" + p.status + ": " +
-      esc(ACTIONS[p.status] || "");
-    if (p.status === "noref") { h += esc(p.ref); }
-    if (p.osm_name && p.status !== "osm_only") {
-      h += "<br>OSM name: " + esc(p.osm_name);
-    }
+    var h = "<strong>Hydrant " + esc(label(p)) + "</strong>" +
+      (p.location_id ? " &middot; " + esc(p.location_id) : "") +
+      "<br>" + p.status + ": " + esc(ACTIONS[p.status] || "");
+    (p.lacks || []).forEach(function (s) {
+      if (s !== p.status) { h += "<br>also " + s + ": " + esc(ACTIONS[s]); }
+    });
     if (p.distance_m != null) {
       h += "<br>City &harr; OSM: " + p.distance_m + " m";
     }
-    if (p.on_demand) { h += "<br>On-demand service: " + esc(p.on_demand); }
+    if (p.nearest_city_m != null) {
+      h += "<br>Nearest City hydrant: " + p.nearest_city_m + " m";
+    }
+    var tags = p.osm_tags || {};
+    var have = Object.keys(tags).map(function (k) { return k + "=" + tags[k]; });
+    if (have.length) { h += "<br>OSM: " + esc(have.join(", ")); }
     h += "<br>" + osmPairHtml(f);
     if (p.other_url) {
       h += ' &middot; <a href="' + p.other_url +
-        '" target="_blank" rel="noopener">other stop with this ref</a>';
+        '" target="_blank" rel="noopener">the other OSM hydrant</a> (' +
+        p.other_distance_m + " m)";
     }
     return h;
   }
 
-  function refKey(p) {
-    var n = parseInt(p.ref, 10);
-    return isNaN(n) ? Infinity : n;
+  // Every status a row answers to: its own, plus each tag it lacks.
+  function statusesOf(p) {
+    var all = [p.status];
+    (p.lacks || []).forEach(function (s) {
+      if (all.indexOf(s) < 0) { all.push(s); }
+    });
+    return all;
+  }
+
+  function sortKey(p) {
+    if (p.hydrant_id != null) { return p.hydrant_id; }
+    return p.objectid != null ? 1e9 + p.objectid : Infinity;
   }
 
   function buildTable() {
     var tbody = document.querySelector("#gap-table tbody");
     var rows = features.slice().sort(function (a, b) {
-      return refKey(a.properties) - refKey(b.properties);
+      return sortKey(a.properties) - sortKey(b.properties);
     });
     tbody.innerHTML = rows.map(function (f) {
       var p = f.properties;
-      var name = p.name || (p.osm_name ? "(OSM) " + p.osm_name : "(unnamed)");
-      var osm = (p.osm_name && p.status !== "osm_only"
-        ? '<span class="osm-name">' + esc(p.osm_name) + "</span>" : "") +
-        '<span class="osm-links">' + osmPairHtml(f) + "</span>";
-      var search = (String(p.ref) + " " + (p.name || "") + " " +
-        (p.osm_name || "")).toLowerCase();
-      return '<tr data-i="' + p._i + '" data-status="' + p.status +
+      var statuses = statusesOf(p);
+      var more = statuses.slice(1).map(function (s) {
+        return ' <span class="also status-' + s + '">+' + s + "</span>";
+      }).join("");
+      var dist = p.status === "far" || p.status === "duplicate"
+        ? p.distance_m : (p.status === "osm_only" ? p.nearest_city_m : null);
+      var search = (label(p) + " " + (p.location_id || "")).toLowerCase();
+      return '<tr data-i="' + p._i + '" data-status="' + statuses.join(" ") +
         '" data-search="' + esc(search) + '">' +
-        '<td class="ref">' + esc(p.ref) + "</td>" +
-        "<td>" + esc(name) + "</td>" +
+        '<td class="ref">' + esc(label(p)) + "</td>" +
+        "<td>" + esc(p.location_id || "") + "</td>" +
         '<td class="status-' + p.status + '">' + p.status +
-        (p.distance_m != null && p.status !== "mismatch" && p.status !== "unnamed"
-          ? ' <span class="dist">' + p.distance_m + "&nbsp;m</span>" : "") +
-        "</td>" +
-        "<td>" + osm + "</td></tr>";
+        (dist != null ? ' <span class="dist">' + dist + "&nbsp;m</span>" : "") +
+        more + "</td>" +
+        '<td><span class="osm-links">' + osmPairHtml(f) + "</span></td></tr>";
     }).join("");
 
     tbody.addEventListener("click", function (ev) {
@@ -163,7 +186,7 @@
     });
   }
 
-  // Select a gap: ring it, join it to its OSM stop, fit the map, open its
+  // Select a gap: ring it, join it to its OSM hydrant, fit the map, open its
   // popup, mark its row.
   function select(i, fromTable) {
     var f = features[i];
@@ -220,7 +243,7 @@
 
       var rows = document.querySelectorAll("#gap-table tbody tr");
       Array.prototype.forEach.call(rows, function (tr) {
-        var hit = statusOn(tr.dataset.status) &&
+        var hit = tr.dataset.status.split(" ").some(statusOn) &&
           (!q || tr.dataset.search.indexOf(q) > -1);
         tr.style.display = hit ? "" : "none";
         var m = markers[parseInt(tr.dataset.i, 10)];

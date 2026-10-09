@@ -20,10 +20,10 @@ def build_site():
     """Render index.html, copy assets and screenshots into build/site/."""
     os.makedirs(config.SITE_DIR, exist_ok=True)
 
-    stop_count = "600+"
+    hydrant_count = "3,500+"
     if os.path.isfile(config.COUNT_PATH):
         with open(config.COUNT_PATH, encoding="utf-8") as f:
-            stop_count = f"{int(f.read().strip()):,}"
+            hydrant_count = f"{int(f.read().strip()):,}"
 
     build_date = date.today().isoformat()
 
@@ -43,7 +43,7 @@ def build_site():
         ),
         "{{BUILD_DATE}}": build_date,
         "{{DATA_DATE}}": _data_date(build_date),
-        "{{STOP_COUNT}}": stop_count,
+        "{{HYDRANT_COUNT}}": hydrant_count,
         "{{GITHUB_REPO}}": config.GITHUB_REPO,
         "{{DATASET_PAGE}}": config.DATASET_PAGE,
         "{{LICENSE_URL}}": config.LICENSE_URL,
@@ -95,7 +95,9 @@ def _build_gaps_page(build_date):
         **{f"{{{{{k.upper()}_COUNT}}}}": f"{summary.get(k, 0):,}"
            for k in compare.STATUSES},
         "{{CITY_COUNT}}": f"{summary.get('city', 0):,}",
-        "{{OSM_COUNT}}": f"{summary.get('osm_stops', 0):,}",
+        "{{OSM_COUNT}}": f"{summary.get('osm_hydrants', 0):,}",
+        "{{MATCHED_COUNT}}": f"{summary.get('matched', 0):,}",
+        "{{NEAR_M}}": str(config.NEAR_M),
         "{{FAR_M}}": str(config.FAR_M),
         "{{OSM_DATE}}": summary.get("osm_date", build_date),
         "{{OSM_NOTE}}": _osm_note(summary),
@@ -141,7 +143,7 @@ def _build_history_page(gaps_dir, build_date):
         "{{FIRST_DATE}}": rows[0]["date"] if rows else build_date,
         "{{HISTORY_JSON}}": json.dumps(rows),
         "{{HISTORY_ROWS}}": "\n".join(_history_row(r) for r in reversed(rows)),
-        # Only counts, but counts of the City's stops, and like the gap page
+        # Only counts, but counts of the City's hydrants, and like the gap page
         # this can be the one page a reader opens: it carries the notice too.
         "{{LICENSE_URL}}": config.LICENSE_URL,
         "{{LICENSE_NOTICE}}": config.LICENSE_NOTICE,
@@ -168,7 +170,7 @@ def _osm_note(summary):
 
     The gap list is only worth acting on if both sides are fresh, and the OSM
     side is the one that moves daily. A page dated today whose OSM data is two
-    weeks old sends a mapper to add a stop somebody else already added.
+    weeks old sends a mapper to add a hydrant somebody else already added.
     """
     if not summary.get("osm_stale"):
         return ""
