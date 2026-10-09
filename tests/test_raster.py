@@ -1,69 +1,41 @@
-"""Tests for raster label placement (run: python tests\\test_raster.py)."""
+"""Tests for the raster dots (run: python tests\\test_raster.py)."""
 
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PIL import ImageFont
-
-from src.raster import (
-    DOT_RADIUS, FONT_PATH, FONT_SIZE, NAME_ZOOM, _place_labels, label_texts,
-)
-
-FONT = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+from src import config
+from src.raster import DOT_COLOR, DOT_RADIUS, _render_tile, _tiles_touching
+from src.tilemath import TILE_SIZE
 
 
-def _stop(ref, x, y, name="Edinburgh at Ginger northbound"):
-    return {"xy": (x, y), "ref": str(ref), "name": name, "fixed_route": True}
+def test_every_raster_zoom_has_a_dot_size():
+    assert set(config.RASTER_ZOOMS) <= set(DOT_RADIUS)
+    # Readable at the editing zoom: wider than a hairline, smaller than a house.
+    assert DOT_RADIUS[max(config.RASTER_ZOOMS)] >= 4
+    print("test_every_raster_zoom_has_a_dot_size: OK")
 
 
-def _overlap(a, b):
-    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
+def test_a_dot_on_a_seam_is_drawn_on_both_tiles():
+    x, y, r = TILE_SIZE, 100, DOT_RADIUS[17]
+    tiles = set(_tiles_touching((x - r, y - r, x + r, y + r)))
+    assert {(0, 0), (1, 0)} <= tiles
+    left = _render_tile(0, 0, [(x, y)], r)
+    right = _render_tile(1, 0, [(x, y)], r)
+    assert left.getpixel((TILE_SIZE - 2, y)) == DOT_COLOR
+    assert right.getpixel((1, y)) == DOT_COLOR
+    print("test_a_dot_on_a_seam_is_drawn_on_both_tiles: OK")
 
 
-def test_names_only_at_the_top_zoom():
-    s = _stop(109, 0, 0)
-    assert label_texts(s, NAME_ZOOM - 1) == ["109"]
-    assert label_texts(s, NAME_ZOOM) == ["109 Edinburgh at Ginger northbound", "109"]
-    assert label_texts(_stop(109, 0, 0, name=""), NAME_ZOOM) == ["109"]
-    print("test_names_only_at_the_top_zoom: OK")
-
-
-def test_a_lone_stop_gets_its_name_to_the_right():
-    labels = _place_labels([_stop(109, 1000, 1000)], FONT, NAME_ZOOM,
-                           DOT_RADIUS[NAME_ZOOM])
-    assert len(labels) == 1
-    x, _y, text, anchor, _box = labels[0]
-    assert text.startswith("109 ") and anchor == "lm" and x > 1000
-    print("test_a_lone_stop_gets_its_name_to_the_right: OK")
-
-
-def test_close_stops_fall_back_rather_than_overprint():
-    # Two stops side by side, 40 px apart: the first takes the right side with
-    # its name; the second cannot print its name either side without crossing
-    # the first's label or dot, and settles for something that does not
-    # overlap.
-    stops = [_stop(109, 1000, 1000), _stop(110, 1040, 1000)]
-    labels = _place_labels(stops, FONT, NAME_ZOOM, DOT_RADIUS[NAME_ZOOM])
-    assert len(labels) == 2
-    assert not _overlap(labels[0][4], labels[1][4])
-    print("test_close_stops_fall_back_rather_than_overprint: OK")
-
-
-def test_at_the_top_zoom_every_stop_keeps_its_number():
-    # The station: platforms a few pixels apart. Below NAME_ZOOM some numbers
-    # are dropped; at NAME_ZOOM none are.
-    stops = [_stop(5833 + i, 1000 + 3 * i, 1000) for i in range(8)]
-    top = _place_labels(stops, FONT, NAME_ZOOM, DOT_RADIUS[NAME_ZOOM])
-    below = _place_labels(stops, FONT, NAME_ZOOM - 1, DOT_RADIUS[NAME_ZOOM - 1])
-    assert len(top) == 8
-    assert len(below) < 8
-    print("test_at_the_top_zoom_every_stop_keeps_its_number: OK")
+def test_a_tile_is_transparent_away_from_the_dots():
+    img = _render_tile(0, 0, [(50, 50)], DOT_RADIUS[17])
+    assert img.getpixel((50, 50)) == DOT_COLOR
+    assert img.getpixel((200, 200))[3] == 0
+    print("test_a_tile_is_transparent_away_from_the_dots: OK")
 
 
 if __name__ == "__main__":
-    test_names_only_at_the_top_zoom()
-    test_a_lone_stop_gets_its_name_to_the_right()
-    test_close_stops_fall_back_rather_than_overprint()
-    test_at_the_top_zoom_every_stop_keeps_its_number()
+    test_every_raster_zoom_has_a_dot_size()
+    test_a_dot_on_a_seam_is_drawn_on_both_tiles()
+    test_a_tile_is_transparent_away_from_the_dots()

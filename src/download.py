@@ -1,15 +1,19 @@
-"""Download the Guelph Bus Stops GeoJSON from the City's ArcGIS service.
+"""Download the Guelph Hydrants GeoJSON from the City's ArcGIS service.
 
-The parks sibling's download step with a different layer number. An ArcGIS
-FeatureServer `/query` is generated per request, so it has no Last-Modified
-or Content-Length worth caching on. The body is ~230 KB, cheap enough to
-fetch every time; what is compared is a **sha256 of the response**.
-Identical hash means the City has not touched the layer, and the existing dated
-file is kept -- which also keeps DATA_DATE meaning "when the City data last
-changed" rather than "when the build last ran".
+The bus stops sibling's download step, with one structural difference: this
+layer does not fit in one reply. The service caps a query at maxRecordCount
+(1,000) and the layer holds ~3,500 hydrants, so the rows are fetched in pages
+ordered by OBJECTID and assembled into one FeatureCollection. The service is
+asked for its count first, and the assembled rows must add up to it -- a page
+lost to a hiccup would otherwise report a few hundred hydrants as missing from
+OSM, and look exactly like a good run.
 
-The output is one dated GeoJSON FeatureCollection in data/, which is all `slim`
-and the rest of the pipeline know about.
+An ArcGIS FeatureServer `/query` is generated per request, so it has no
+Last-Modified worth caching on. What is compared is a **sha256 of the
+assembled FeatureCollection**. Identical hash means the City has not touched
+the layer, and the existing dated file is kept -- which also keeps DATA_DATE
+meaning "when the City data last changed" rather than "when the build last
+ran".
 
 Every request is gated on a usable link first (``addressvault.net``, the same
 gate the address vault pulls behind). The weekly trigger is what makes that
@@ -27,15 +31,14 @@ from addressvault import net
 
 from src import config
 
-# The Bus Stops layer is ~650 points, ~230 KB of GeoJSON -- a retry costs
-# a couple of seconds when the link is healthy and buys back a week when it is
-# not.
+# Four pages of ~250 KB -- a retry costs a couple of seconds when the link is
+# healthy and buys back a week when it is not.
 RETRIES = 3
 RETRY_WAIT = 30
 
 
 def download(force=False):
-    """Download the latest Bus Stops GeoJSON.
+    """Download the latest Hydrants GeoJSON.
 
     Returns (status, filepath) where status is "DOWNLOADED" or "SKIPPED".
     Raises ``net.LinkUnavailable`` when the host has no usable link: nothing was
@@ -49,9 +52,10 @@ def download(force=False):
     # a wait would be killed mid-sleep -- retrying is the scheduler's job.
     net.wait_for_link(wait=False)
 
-    print("Querying the Bus Stops FeatureServer ...")
-    body = _fetch(config.DATASET_URL)
-    _check_payload(body)
+    print("Querying the Hydrants FeatureServer ...")
+    features = fetch_all()
+    body = json.dumps({"type": "FeatureCollection", "features": features},
+                      separators=(",", ":")).encode("utf-8")
     digest = hashlib.sha256(body).hexdigest()
 
     sidecar = _load_sidecar()
@@ -64,7 +68,7 @@ def download(force=False):
     # No server-side edit date exists on this service (the layer has no
     # editingInfo and no last_edited_date field), so the file is dated by the
     # day the change was first seen here.
-    filename = f"bus-stops-{date.today().isoformat()}.geojson"
+    filename = f"hydrants-{date.today().isoformat()}.geojson"
     filepath = os.path.join(config.DATA_DIR, filename)
     with open(filepath, "wb") as f:
         f.write(body)
@@ -72,6 +76,43 @@ def download(force=False):
 
     _save_sidecar(digest, len(body), filename)
     return "DOWNLOADED", filepath
+
+
+def fetch_all(fetch=None):
+    """Every feature in the layer, page by page; raises on a short extract."""
+    fetch = fetch or _fetch
+    expected = _count(fetch(_url(returnCountOnly="true", f="json")))
+    print(f"  the service reports {expected:,} rows")
+    features = []
+    while True:
+        page = _check_page(fetch(_url(
+            outFields="*", outSR="4326", f="geojson", orderByFields="OBJECTID",
+            resultOffset=str(len(features)),
+            resultRecordCount=str(config.PAGE_SIZE),
+        )))
+        features.extend(page["features"])
+        more = (page.get("properties") or {}).get("exceededTransferLimit") \
+            or page.get("exceededTransferLimit")
+        if not more or not page["features"]:
+            break
+    print(f"  {len(features):,} features")
+    if len(features) != expected:
+        raise RuntimeError(
+            f"Paged {len(features):,} features but the service counts "
+            f"{expected:,}. The extract is partial or the layer changed "
+            f"mid-download -- not trusting it."
+        )
+    ids = [(f.get("properties") or {}).get(config.OBJECT_ID_KEY) for f in features]
+    if len(set(ids)) != len(ids):
+        raise RuntimeError("A page repeated rows (duplicate OBJECTID) -- not trusting it.")
+    if not features:
+        raise RuntimeError("The service returned no hydrants.")
+    return features
+
+
+def _url(**params):
+    query = "&".join(f"{k}={v}" for k, v in {"where": "1%3D1", **params}.items())
+    return f"{config.QUERY_URL}?{query}"
 
 
 def _fetch(url):
@@ -96,35 +137,32 @@ def _fetch(url):
             time.sleep(RETRY_WAIT)
 
 
-def _check_payload(body):
-    """Reject an answer that is not a whole FeatureCollection.
-
-    An ArcGIS service answers an error with HTTP 200 and a JSON body carrying an
-    ``error`` object, so raise_for_status proves nothing. It also silently
-    truncates a page at maxRecordCount and sets ``exceededTransferLimit``; at
-    ~650 rows against a limit of 100,000 that cannot happen today, so this
-    raises rather than paginating -- a partial extract would report the stops
-    that fell off the end as missing from OSM, and that is worth stopping for,
-    not working around.
-    """
+def _parse(body):
+    """JSON, or a RuntimeError. An ArcGIS service answers an error with HTTP
+    200 and a JSON body carrying an ``error`` object, so raise_for_status
+    proves nothing."""
     try:
         doc = json.loads(body)
     except ValueError as e:
         raise RuntimeError(f"The service did not return JSON: {e}")
     if "error" in doc:
         raise RuntimeError(f"The service returned an error: {doc['error']}")
+    return doc
+
+
+def _count(body):
+    doc = _parse(body)
+    if not isinstance(doc.get("count"), int):
+        raise RuntimeError(f"Expected a row count, got {doc!r:.200}")
+    return doc["count"]
+
+
+def _check_page(body):
+    doc = _parse(body)
     if doc.get("type") != "FeatureCollection":
         raise RuntimeError(f"Expected a FeatureCollection, got {doc.get('type')!r}")
-    if doc.get("exceededTransferLimit"):
-        raise RuntimeError(
-            "The service truncated the result (exceededTransferLimit). The "
-            "download is a partial extract -- paginate with resultOffset / "
-            "resultRecordCount before trusting it."
-        )
-    n = len(doc.get("features") or ())
-    print(f"  {n:,} features")
-    if not n:
-        raise RuntimeError("The service returned an empty FeatureCollection.")
+    doc["features"] = doc.get("features") or []
+    return doc
 
 
 def _load_sidecar():

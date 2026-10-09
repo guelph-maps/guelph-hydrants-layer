@@ -4,7 +4,7 @@ The Overpass half is carried over from the parks sibling, where it pins the
 failure that actually happened: on 2026-08-10 and again on 2026-08-17
 overpass-api.de answered 504, the single attempt gave up, the run silently
 compared against a fortnight-old cache and reported success. The matching half
-is this layer's own: by ref, then by distance, and never across agencies.
+is this layer's own: by distance alone, nearest pair first, one to one.
 """
 
 import json
@@ -25,7 +25,7 @@ from src import compare, config, site  # noqa: E402
 OSM_BASE = (datetime.now(timezone.utc) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
 GOOD = {"osm3s": {"timestamp_osm_base": OSM_BASE},
         "elements": [{"type": "node", "id": i, "lat": 43.5, "lon": -80.2,
-                      "tags": {"highway": "bus_stop"}}
+                      "tags": {"emergency": "fire_hydrant"}}
                      for i in range(config.OSM_MIN_ELEMENTS + 1)]}
 
 
@@ -62,7 +62,7 @@ def _post(by_host):
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     """Point the cache + sidecar at a temp dir, and never really sleep."""
-    monkeypatch.setattr(config, "OSM_CACHE_PATH", str(tmp_path / "osm-bus-stops.json"))
+    monkeypatch.setattr(config, "OSM_CACHE_PATH", str(tmp_path / "osm-hydrants.json"))
     monkeypatch.setattr(config, "OSM_FETCH_PATH", str(tmp_path / ".osm-fetch.json"))
     monkeypatch.setattr(compare.time, "sleep", lambda _s: None)
     return tmp_path
@@ -102,7 +102,7 @@ def test_the_mirror_list_is_retried_before_giving_up(paths, monkeypatch):
 def test_an_implausibly_small_reply_is_not_accepted(paths, monkeypatch):
     # overpass.osm.ch serves a Switzerland extract and answers a Guelph bbox
     # with HTTP 200 and zero elements. Believing it would report every City
-    # stop as missing from OSM -- 648 fictional gaps.
+    # hydrant as missing from OSM -- 3,537 fictional gaps.
     monkeypatch.setattr(config, "OVERPASS_URLS",
                         ("https://regional.example/api", "https://good.example/api"))
     post = _post({"regional.example": FakeResponse({"elements": []}),
@@ -116,7 +116,8 @@ def test_an_implausibly_small_reply_is_not_accepted(paths, monkeypatch):
 
 def test_a_reply_from_months_old_data_is_not_accepted(paths, monkeypatch):
     # overpass.private.coffee answered the Toronto sibling on 2026-09-29 in
-    # full, with OSM as of 2026-05-06; its page showed May as this week.
+    # full, with OSM as of 2026-05-06; its page showed May as this week. It
+    # did the same with Guelph's hydrants on 2026-10-09 (OSM of 2026-05-31).
     monkeypatch.setattr(config, "OVERPASS_URLS",
                         ("https://lagging.example/api", "https://good.example/api"))
     stale = {**GOOD, "osm3s": {"timestamp_osm_base": "2026-05-06T03:25:00Z"}}
@@ -227,10 +228,12 @@ def test_a_fresh_comparison_adds_nothing():
 
 # --- matching ---------------------------------------------------------------
 #
-# Positions are built as metre offsets from one City stop, so each test reads
-# as the street layout it describes.
+# Positions are built as metre offsets from one City hydrant, so each test
+# reads as the street layout it describes.
 
 BASE_LAT, BASE_LON = 43.5448, -80.2482
+TAGGED = {"fire_hydrant:type": "pillar", "colour": "yellow",
+          "fire_hydrant:position": "green"}
 
 
 def _at(north_m=0.0, east_m=0.0):
@@ -239,136 +242,123 @@ def _at(north_m=0.0, east_m=0.0):
     return lat, lon
 
 
-def _city(ref, name="Wyndham at Fountain southbound", north_m=0, east_m=0,
-          fixed_route=True):
+def _city(hid, north_m=0, east_m=0):
     lat, lon = _at(north_m, east_m)
-    return {"ref": ref, "name": name, "fixed_route": fixed_route,
-            "on_demand": None if fixed_route else "Monday-Saturday",
-            "lat": lat, "lon": lon}
+    return {"hydrant_id": hid, "location_id": f"H40-{hid:03d}",
+            "objectid": hid, "lat": lat, "lon": lon}
 
 
 def _node(oid, north_m=0, east_m=0, **tags):
     lat, lon = _at(north_m, east_m)
     return {"type": "node", "id": oid, "lat": lat, "lon": lon,
-            "tags": {"highway": "bus_stop", **tags}}
+            "tags": {"emergency": "fire_hydrant", **tags}}
+
+
+def _tagged(oid, north_m=0, east_m=0):
+    return _node(oid, north_m, east_m, **TAGGED)
 
 
 def _run(city, elements):
-    gaps, counts = compare._match(city, compare._osm_stops({"elements": elements}))
-    return {(g["properties"]["ref"], g["properties"]["status"]) for g in gaps}, counts
+    gaps, counts = compare._match(city, compare._osm_hydrants({"elements": elements}))
+    return {(g["properties"]["hydrant_id"] or g["properties"]["osm_url"],
+             g["properties"]["status"]) for g in gaps}, counts, gaps
 
 
-def test_a_stop_with_its_ref_and_name_is_not_a_gap():
-    gaps, counts = _run([_city(801)],
-                        [_node(1, 2, name="Wyndham at Fountain southbound",
-                               ref="801", network="Guelph Transit")])
-    assert gaps == set() and sum(counts.values()) == 0
-
-
-def test_names_match_through_case_and_punctuation_only():
-    assert compare._norm("Gordon & Nottingham") == compare._norm("gordon and nottingham")
-    # Dropping the direction is a real difference, not noise.
-    assert compare._norm("Gordon at Nottingham") != \
-        compare._norm("Gordon at Nottingham southbound")
-
-
-def test_ref_match_reports_mismatch_and_unnamed():
-    gaps, _ = _run([_city(801), _city(297, "Wyndham at Fountain northbound", east_m=20)],
-                   [_node(1, ref="801", name="Wyndham at Fountain"),
-                    _node(2, east_m=20, ref="297")])
-    assert gaps == {(801, "mismatch"), (297, "unnamed")}
-
-
-def test_a_ref_matched_stop_far_away_is_far():
-    gaps, _ = _run([_city(501)], [_node(1, north_m=120, ref="501",
-                                        name="Wyndham at Fountain southbound")])
-    assert gaps == {(501, "far")}
-
-
-def test_two_osm_stops_far_apart_with_one_ref_are_a_duplicate():
-    # Seen downtown on 2026-10-08: ref 801 on two nodes 59 m apart.
-    gaps, _ = _run([_city(801)],
-                   [_node(1, 1, ref="801", name="Wyndham at Fountain southbound"),
-                    _node(2, 60, ref="801", name="Wyndham at Fountain southbound")])
-    assert gaps == {(801, "duplicate")}
-
-
-def test_a_platform_way_beside_its_node_is_not_a_duplicate():
-    way = {"type": "way", "id": 9, "center": dict(zip(("lat", "lon"), _at(4))),
-           "tags": {"public_transport": "platform", "bus": "yes", "ref": "801",
-                    "name": "Wyndham at Fountain southbound"}}
-    gaps, _ = _run([_city(801)],
-                   [_node(1, 1, ref="801", name="Wyndham at Fountain southbound"), way])
+def test_a_tagged_hydrant_beside_the_citys_is_not_a_gap():
+    gaps, counts, _ = _run([_city(1)], [_tagged(1, 1.4)])
     assert gaps == set()
+    assert counts["matched"] == 1
+    assert sum(counts[s] for s in compare.STATUSES) == 0
 
 
-def test_an_unreferenced_osm_stop_goes_to_the_nearest_city_stop_only():
-    # Two City stops 20 m apart across the road; one OSM stop with no ref, 5 m
-    # from the southbound one. Within NEAR_M of both, it is only the nearer's.
-    gaps, counts = _run(
-        [_city(801), _city(297, "Wyndham at Fountain northbound", east_m=20)],
-        [_node(1, east_m=5)],
-    )
-    assert gaps == {(801, "noref"), (297, "missing")}
-    assert counts["noref"] == 1 and counts["missing"] == 1
+def test_no_osm_hydrant_nearby_is_missing():
+    gaps, counts, _ = _run([_city(1)], [_tagged(1, north_m=500)])
+    assert (1, "missing") in gaps and counts["missing"] == 1
 
 
-def test_an_unreferenced_stop_beyond_near_m_is_not_claimed():
-    gaps, _ = _run([_city(801)], [_node(1, north_m=config.NEAR_M + 5)])
-    assert gaps == {(801, "missing")}
+def test_between_near_m_and_far_m_is_far():
+    gaps, _counts, rows = _run([_city(1)], [_tagged(1, north_m=config.NEAR_M + 5)])
+    assert gaps == {(1, "far")}
+    assert rows[0]["properties"]["distance_m"] == pytest.approx(config.NEAR_M + 5, abs=0.2)
 
 
-def test_another_agencys_stop_is_never_matched():
-    # GO Transit's platforms share Guelph Central Station with Guelph Transit's.
-    gaps, counts = _run([_city(5833, "Guelph Central Station Platform 1")],
-                        [_node(1, 2, network="GO Transit", operator="Metrolinx",
-                               name="Guelph Central GO")])
-    assert gaps == {(5833, "missing")}
-    assert counts["osm_only"] == 0
-
-
-def test_an_on_demand_only_stop_is_not_called_missing():
-    gaps, counts = _run([_city(9001, fixed_route=False)], [])
-    assert gaps == {(9001, "ondemand")}
-    assert counts["missing"] == 0
-
-
-def test_an_osm_ref_the_city_does_not_list_is_osm_only():
-    gaps, counts = _run([_city(801)],
-                        [_node(1, ref="801", name="Wyndham at Fountain southbound",
-                               network="Guelph Transit"),
-                         _node(2, north_m=300, ref="4242", network="Guelph Transit")])
-    assert gaps == {("4242", "osm_only")}
+def test_beyond_far_m_the_city_hydrant_is_missing_and_the_osm_one_osm_only():
+    # The City layer is municipal hydrants only; an OSM hydrant nowhere near
+    # one is most likely on private land, not wrong.
+    gaps, counts, rows = _run([_city(1)], [_tagged(7, north_m=config.FAR_M + 30)])
+    assert gaps == {(1, "missing"), ("https://www.openstreetmap.org/node/7", "osm_only")}
+    only = [r for r in rows if r["properties"]["status"] == "osm_only"][0]
+    assert only["properties"]["nearest_city_m"] == config.FAR_M + 30
     assert counts["osm_only"] == 1
 
 
-def test_an_untagged_stops_ref_is_matched_but_never_called_osm_only():
-    # Most Guelph stops with a ref carry a network too, but a bare ref is still
-    # read as a Guelph Transit stop ID for matching. It is not read as a stale
-    # one: an untagged stop's numbering may be another agency's.
-    gaps, _ = _run([_city(801)],
-                   [_node(1, ref="801", name="Wyndham at Fountain southbound"),
-                    _node(2, north_m=300, ref="4242")])
+def test_nearest_pair_first_keeps_one_osm_hydrant_from_answering_for_two():
+    # Two City hydrants 8 m apart (a corner, both sides); one OSM hydrant 2 m
+    # from the first. Within NEAR_M of both, it is only the first's.
+    gaps, counts, _ = _run([_city(1), _city(2, east_m=8)], [_tagged(1, east_m=-2)])
+    assert gaps == {(2, "missing")}
+    assert counts["matched"] == 1
+
+
+def test_nearest_pair_first_is_not_city_order_first():
+    # City 1 is scanned first, and OSM a (4 m from it) is its nearest. But a
+    # is 2 m from City 2, and OSM b is 7 m from City 1 and 13 m from City 2.
+    # Pairing in City order gives City 1 a and leaves City 2 "far"; nearest
+    # pair first matches both.
+    gaps, counts, _ = _run([_city(1), _city(2, east_m=6)],
+                           [_tagged(1, east_m=4), _tagged(2, east_m=-7)])
     assert gaps == set()
+    assert counts["matched"] == 2
 
 
-def test_a_multi_valued_ref_matches_each_stop():
-    gaps, _ = _run([_city(801), _city(297, "Wyndham at Fountain northbound")],
-                   [_node(1, ref="801;297")])
-    assert gaps == {(801, "unnamed"), (297, "unnamed")}
+def test_a_second_osm_hydrant_beside_a_matched_one_is_a_duplicate():
+    # Seen on 2026-10-09: a node 11 m from a City hydrant a nearer node took.
+    gaps, counts, rows = _run([_city(1)], [_tagged(1, 1), _tagged(2, north_m=11)])
+    assert gaps == {(1, "duplicate")}
+    assert rows[0]["properties"]["other_url"].endswith("/node/2")
+    assert rows[0]["properties"]["other_distance_m"] == 11
+    assert counts["duplicate"] == 1 and counts["osm_only"] == 0
+
+
+def test_tag_gaps_are_one_row_each_counted_on_its_own():
+    gaps, counts, rows = _run([_city(1), _city(2, north_m=200)],
+                              [_node(1, 1, colour="yellow"),
+                               _node(2, 201, **{"fire_hydrant:type": "pillar",
+                                                "colour": "red"})])
+    assert gaps == {(1, "notype"), (2, "noposition")}
+    lacks = {r["properties"]["hydrant_id"]: r["properties"]["lacks"] for r in rows}
+    assert lacks == {1: ["notype", "noposition"], 2: ["noposition"]}
+    assert (counts["notype"], counts["nocolour"], counts["noposition"]) == (1, 0, 2)
+
+
+def test_a_far_hydrants_tags_are_not_checked():
+    # Which hydrant it is is the open question; its tags can wait.
+    gaps, counts, _ = _run([_city(1)], [_node(1, north_m=20)])
+    assert gaps == {(1, "far")}
+    assert counts["notype"] == counts["noposition"] == 0
+
+
+def test_every_osm_hydrant_is_accounted_for():
+    # Matched, far, duplicate or osm_only: none falls between the statuses.
+    city = [_city(1), _city(2, north_m=100), _city(3, north_m=200)]
+    osm = [_tagged(1, 1), _tagged(2, 0.5), _tagged(3, 115), _tagged(4, 400),
+           _tagged(5, 203)]
+    _gaps, counts, _ = _run(city, osm)
+    assert counts["matched"] + counts["far"] + counts["duplicate"] + \
+        counts["osm_only"] == len(osm)
 
 
 def test_ways_are_placed_at_their_center():
-    stops = compare._osm_stops({"elements": [
+    hydrants = compare._osm_hydrants({"elements": [
         {"type": "way", "id": 7, "center": {"lat": 43.5, "lon": -80.2},
-         "tags": {"public_transport": "platform", "bus": "yes"}},
+         "tags": {"emergency": "fire_hydrant", "colour": "red", "ref": "9"}},
         {"type": "relation", "id": 8, "tags": {}},   # no position: skipped
     ]})
-    assert [(s["otype"], s["lat"], s["lon"]) for s in stops] == [("way", 43.5, -80.2)]
+    assert [(h["otype"], h["lat"], h["lon"], h["tags"]) for h in hydrants] == \
+        [("way", 43.5, -80.2, {"colour": "red"})]
 
 
-def test_the_query_asks_for_both_tagging_schemes_with_a_position():
+def test_the_query_asks_for_every_hydrant_with_a_position():
     q = compare._overpass_query()
-    assert 'nwr["highway"="bus_stop"]' in q
-    assert 'nwr["public_transport"="platform"]["bus"="yes"]' in q
+    assert 'nwr["emergency"="fire_hydrant"]' in q
     assert q.rstrip().endswith("out center tags;")

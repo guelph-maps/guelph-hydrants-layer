@@ -1,15 +1,13 @@
-"""Filter the Bus Stops GeoJSON into a slim newline-delimited GeoJSON.
+"""Filter the Hydrants GeoJSON into a slim newline-delimited GeoJSON.
 
-The source file is a ~230 KB GeoJSON FeatureCollection; it is parsed as a
-stream with ijson for consistency with the sibling projects. Every point with a
-stop ID is kept, one compact Feature per line, in data/bus-stops-slim.geojsonl
--- the input to both tile builders and to the gap tool.
+The source file is a ~800 KB GeoJSON FeatureCollection; it is parsed as a
+stream with ijson for consistency with the sibling projects. Every point is
+kept, one compact Feature per line, in data/hydrants-slim.geojsonl -- the input
+to both tile builders and to the gap tool.
 
-There is no status filter to apply: the City removes a retired stop from the
-extract rather than flagging it. The one categorical field, fixed-route vs
-on-demand-only service, is carried through rather than filtered on -- an
-on-demand pick-up point is real, and the tiles draw it, hollow. See
-config.FIXED_ROUTE_KEY.
+There is no key to check here, unlike the bus stops: nothing is matched on an
+ID, only on position, so a row with no HYDRANTID (7 on 2026-10-09) is still a
+hydrant. There is no status filter either -- the layer has no status field.
 """
 
 import json
@@ -19,53 +17,44 @@ import ijson
 
 from src import config
 
-# Sanity bounds for the slimmed feature count (648 stops on 2026-10-08).
-MIN_EXPECTED = 500
-MAX_EXPECTED = 900
+# Sanity bounds for the slimmed feature count (3,537 hydrants on 2026-10-09).
+MIN_EXPECTED = 3000
+MAX_EXPECTED = 4500
 
 
 def slim(src_path):
-    """Stream the GeoJSON into data/bus-stops-slim.geojsonl.
+    """Stream the GeoJSON into data/hydrants-slim.geojsonl.
 
-    Keeps Point features that carry a stop ID, with `ref`, `name`,
-    `fixed_route`, `on_demand` and `objectid` properties. Returns the slim file
-    path. Raises if the feature count is implausible, or if two points share a
-    stop ID -- the gap page matches on it, so it has to be a key.
+    Keeps Point features, with `hydrant_id`, `location_id`, `model` and
+    `objectid` properties where the City has them. Returns the slim file path.
+    Raises if the feature count is implausible.
     """
     print(f"Slimming {src_path} ...")
     os.makedirs(config.DATA_DIR, exist_ok=True)
 
     count = 0
     skipped = 0
-    seen = set()
     with open(src_path, "rb") as src, \
             open(config.SLIM_PATH, "w", encoding="utf-8") as out:
         for feature in ijson.items(src, "features.item"):
             props_in = feature.get("properties") or {}
             geom = feature.get("geometry") or {}
-            ref = stop_ref(props_in.get(config.REF_KEY))
-            if geom.get("type") != "Point" or not geom.get("coordinates") \
-                    or ref is None:
+            if geom.get("type") != "Point" or not geom.get("coordinates"):
                 skipped += 1
                 continue
-            if ref in seen:
-                raise RuntimeError(f"Stop ID {ref} appears twice in {src_path}.")
-            seen.add(ref)
 
-            props_out = {"ref": ref}
-            name = props_in.get(config.NAME_KEY)
-            if name:
-                props_out["name"] = str(name).strip()
-            props_out["fixed_route"] = (
-                "yes" if str(props_in.get(config.FIXED_ROUTE_KEY, "")).strip()
-                .lower() == "yes" else "no"
-            )
-            on_demand = props_in.get(config.ON_DEMAND_KEY)
-            if on_demand:
-                props_out["on_demand"] = str(on_demand).strip()
-            # The ArcGIS row id. Shown so a reviewer can find the row again in
-            # the same extract -- it can renumber when the layer is
-            # republished, so nothing keys on it; the stop ID is the key.
+            props_out = {}
+            hydrant_id = props_in.get(config.HYDRANT_ID_KEY)
+            if hydrant_id is not None:
+                props_out["hydrant_id"] = int(hydrant_id)
+            for key, name in ((config.LOCATION_ID_KEY, "location_id"),
+                              (config.MODEL_KEY, "model")):
+                value = str(props_in.get(key) or "").strip()
+                if value:
+                    props_out[name] = value
+            # The ArcGIS row id. It can renumber when the layer is republished,
+            # so nothing keys on it; it names the row for a reviewer when the
+            # City left HYDRANTID blank.
             objectid = props_in.get(config.OBJECT_ID_KEY)
             if objectid is not None:
                 props_out["objectid"] = int(objectid)
@@ -91,22 +80,3 @@ def slim(src_path):
             f"{MIN_EXPECTED:,}-{MAX_EXPECTED:,} -- aborting."
         )
     return config.SLIM_PATH
-
-
-def stop_ref(value):
-    """The City's stop ID as an int, or None.
-
-    The service types StopId as a double, so it arrives as 109 or 109.0 (or a
-    Decimal, through ijson). OSM's ref is written "109" -- never
-    "109.0" -- so it is normalised here, once, and everything downstream
-    compares ints.
-    """
-    if value is None or value == "":
-        return None
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    if f != int(f) or f <= 0:
-        return None
-    return int(f)
