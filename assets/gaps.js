@@ -71,8 +71,15 @@
       });
       m.bindPopup(popupHtml(f));
       m.on("click", function () { select(i, false); });
-      m.addTo(map);
       markers[i] = m;
+    });
+    // Canvas draws in the order added: "missing" first, so it never covers
+    // the rarer statuses.
+    features.forEach(function (f, i) {
+      if (f.properties.status === "missing") { markers[i].addTo(map); }
+    });
+    features.forEach(function (f, i) {
+      if (f.properties.status !== "missing") { markers[i].addTo(map); }
     });
 
     buildTable();
