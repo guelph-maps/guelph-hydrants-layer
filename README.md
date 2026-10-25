@@ -38,7 +38,8 @@ worked right now (44 hydrants added in 2026-07).
   editors.
 - A **gap-review page** (`/gaps/`) on an interactive map and a filterable
   table, and its **history page** (`/gaps/history.html`) charting the counts,
-  one point per weekly run.
+  one point per weekly run. Each row links to openstreetmap.org, iD and
+  **JOSM** (needs JOSM running with Preferences &rarr; Remote Control enabled).
 
 ## No ref, on purpose
 
