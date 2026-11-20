@@ -10,7 +10,8 @@ OSM, and look exactly like a good run.
 
 An ArcGIS FeatureServer `/query` is generated per request, so it has no
 Last-Modified worth caching on. What is compared is a **sha256 of the
-assembled FeatureCollection**. Identical hash means the City has not touched
+assembled FeatureCollection**. The hash leaves out the GlobalID the service reissues on
+every request. Identical hash means the City has not touched
 the layer, and the existing dated file is kept -- which also keeps DATA_DATE
 meaning "when the City data last changed" rather than "when the build last
 ran".
@@ -20,7 +21,6 @@ gate the address vault pulls behind). The weekly trigger is what makes that
 worth doing: a run lost to a dead link is not retried for a week.
 """
 
-import hashlib
 import json
 import os
 from datetime import date
@@ -35,6 +35,11 @@ from src import config
 # healthy and buys back a week when it is not.
 RETRIES = 3
 RETRY_WAIT = 30
+
+# Left out of the hash, not out of the file. The service makes GlobalID up afresh
+# for every row each time it is asked, so a hash that kept it changed on every
+# run and dated the City data to the last build instead of the last edit.
+UNSTABLE_FIELDS = ("GlobalID",)
 
 
 def download(force=False):
@@ -56,7 +61,7 @@ def download(force=False):
     features = fetch_all()
     body = json.dumps({"type": "FeatureCollection", "features": features},
                       separators=(",", ":")).encode("utf-8")
-    digest = hashlib.sha256(body).hexdigest()
+    digest = citydata.digest(features, ignore=UNSTABLE_FIELDS)
 
     sidecar = _load_sidecar()
     if not force and sidecar and sidecar.get("sha256") == digest:

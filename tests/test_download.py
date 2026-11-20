@@ -192,3 +192,32 @@ def test_a_changed_extract_is_written(data_dir, monkeypatch):
     monkeypatch.setattr("src.download.requests.get", _service(n=127))
     status, _path = dl.download()
     assert status == "DOWNLOADED"
+
+
+def _reissuing(get):
+    """``get``, but every row comes back with a fresh GlobalID, as the live
+    service hands out on every request."""
+    import uuid
+
+    def wrapped(url, headers=None, timeout=None):
+        resp = get(url, headers=headers, timeout=timeout)
+        doc = json.loads(resp.content)
+        for f in doc.get("features") or ():
+            f["properties"]["GlobalID"] = "{%s}" % uuid.uuid4()
+        return FakeResponse(json.dumps(doc).encode(), resp.status_code)
+    return wrapped
+
+
+def test_a_reissued_globalid_alone_is_not_a_change(data_dir, monkeypatch):
+    # Kept in the hash, it changed every run and dated the City data to the
+    # last build rather than the last edit.
+    monkeypatch.setattr("src.download.requests.get", _reissuing(_service()))
+    _status, first_path = dl.download()
+    assert dl.download() == ("SKIPPED", first_path)
+
+
+def test_a_real_change_is_seen_through_a_reissued_globalid(data_dir, monkeypatch):
+    monkeypatch.setattr("src.download.requests.get", _reissuing(_service(n=126)))
+    dl.download()
+    monkeypatch.setattr("src.download.requests.get", _reissuing(_service(n=127)))
+    assert dl.download()[0] == "DOWNLOADED"
